@@ -123,9 +123,9 @@ def test_recovery_does_not_touch_job_with_valid_lease(
 
 def test_recovery_ignores_completed_jobs(clean_jobs, conn_a):
     # Arrange: insert a COMPLETED job.
-    # complete_job() leaves worker_id and lease_expires_at in place,
-    # so a real completed job ends up with an expired lease. Only the
-    # status = 'RUNNING' filter keeps recovery from re-running it.
+    # complete_job() clears the lease, but this row keeps an expired
+    # one on purpose: even if a lease were ever left behind, the
+    # status = 'RUNNING' filter must keep recovery from re-running it.
     job_id = insert_leased_job(
         conn_a,
         attempt=1,

@@ -2,17 +2,22 @@ def complete_job(conn, job_id, worker_id, attempt):
     """
     Mark a job as COMPLETED only if
     the caller still owns a valid lease.
+
+    The lease is cleared; worker_id is kept as a record
+    of which worker finished the job.
     """
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE jobs
-                SET status = 'COMPLETED'
-                WHERE id = %s 
+                SET
+                    status = 'COMPLETED',
+                    lease_expires_at = NULL
+                WHERE id = %s
                     AND status = 'RUNNING'
-                    AND worker_id = %s 
-                    AND attempt = %s 
+                    AND worker_id = %s
+                    AND attempt = %s
                     AND lease_expires_at > NOW()
                 RETURNING id;
                 """,
