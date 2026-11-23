@@ -142,7 +142,8 @@ def test_stale_attempt_cannot_complete_reclaimed_job(clean_jobs, conn_a):
     final_state = get_job_state(conn_a, job_id)
 
     assert final_state[0] == "COMPLETED"
-    assert final_state[1] == "worker-A"
+    assert final_state[1] == "worker-A"  # kept as a record of who finished it
+    assert final_state[2] is None  # a completed job holds no lease
     assert final_state[3] == 2
 
 
