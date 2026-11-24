@@ -10,6 +10,7 @@ def insert_job(
     attempt=0,
     max_attempts=3,
     lease_interval=None,
+    idempotency_key=None,
 ):
     """
     Insert a job and return its id.
@@ -20,7 +21,13 @@ def insert_job(
     lease_interval is a Postgres interval relative to NOW(),
     e.g. '30 seconds' for a live lease or '-1 second' for an
     expired one. None means no lease.
+
+    idempotency_key defaults to a random UUID; pass one when the
+    test needs to know it (claim_job doesn't return it).
     """
+    if idempotency_key is None:
+        idempotency_key = str(uuid.uuid4())
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -37,7 +44,7 @@ def insert_job(
             RETURNING id
             """,
             (
-                str(uuid.uuid4()),
+                idempotency_key,
                 status,
                 worker_id,
                 attempt,
