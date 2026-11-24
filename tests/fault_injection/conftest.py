@@ -43,3 +43,24 @@ def job_effects_table():
         finally:
             admin.execute("DROP TABLE IF EXISTS job_effects")
 
+
+@pytest.fixture
+def unique_job_effects_table(job_effects_table):
+    """
+    job_effects with a UNIQUE idempotency_key, for idempotent-handler tests.
+
+    Builds on job_effects_table (which creates and drops the table), so
+    the base table stays non-unique for tests that demonstrate duplicates.
+    """
+    with psycopg.connect(
+        os.environ["TEST_DATABASE_URL"], autocommit=True
+    ) as admin:
+        admin.execute(
+            """
+            ALTER TABLE job_effects
+            ADD CONSTRAINT job_effects_idempotency_key_unique
+            UNIQUE (idempotency_key)
+            """
+        )
+
+    yield
