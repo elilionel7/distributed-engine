@@ -1,8 +1,8 @@
 import threading
-import time
 import uuid
 
 from engine.workers.recover_expired_job import recover_expired_jobs
+from tests.helpers import wait_until_blocked_on_lock
 
 
 def insert_leased_job(
@@ -166,48 +166,6 @@ def test_recovery_is_idempotent(clean_jobs, conn_a):
     # The second run didn't change the row.
     assert get_job_state(conn_a, job_id) == state_after_first
     assert state_after_first == ("PENDING", None, None, 1)
-
-
-def wait_until_blocked_on_lock(
-    monitor_conn,
-    backend_pid,
-    blocker_pid,
-    timeout=1.5,
-):
-    """
-    Poll until backend_pid is waiting on a lock held by blocker_pid.
-
-    Checking the blocker (not just "waiting on some lock") proves the
-    contention is the one the test set up, not an unrelated session.
-
-    The timeout must stay below conn_b's lock_timeout (2s), or B gives
-    up waiting before we can observe it.
-    """
-    deadline = time.monotonic() + timeout
-
-    while time.monotonic() < deadline:
-        row = monitor_conn.execute(
-            """
-            SELECT wait_event_type, pg_blocking_pids(pid)
-            FROM pg_stat_activity
-            WHERE pid = %s
-            """,
-            (backend_pid,),
-        ).fetchone()
-
-        if (
-            row is not None
-            and row[0] == "Lock"
-            and blocker_pid in row[1]
-        ):
-            return
-
-        time.sleep(0.01)
-
-    raise AssertionError(
-        f"Backend {backend_pid} never blocked "
-        f"on backend {blocker_pid}"
-    )
 
 
 def test_concurrent_recovery_recovers_job_exactly_once(

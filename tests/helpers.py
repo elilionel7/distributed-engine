@@ -1,5 +1,6 @@
 """Database helpers shared by integration and fault-injection tests."""
 
+import time
 import uuid
 
 
@@ -80,3 +81,45 @@ def expire_lease(conn, job_id):
             """,
             (job_id,),
         )
+
+
+def wait_until_blocked_on_lock(
+    monitor_conn,
+    backend_pid,
+    blocker_pid,
+    timeout=1.5,
+):
+    """
+    Poll until backend_pid is waiting on a lock held by blocker_pid.
+
+    Checking the blocker (not just "waiting on some lock") proves the
+    contention is the one the test set up, not an unrelated session.
+
+    The timeout must stay below conn_b's lock_timeout (2s), or B gives
+    up waiting before we can observe it.
+    """
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        row = monitor_conn.execute(
+            """
+            SELECT wait_event_type, pg_blocking_pids(pid)
+            FROM pg_stat_activity
+            WHERE pid = %s
+            """,
+            (backend_pid,),
+        ).fetchone()
+
+        if (
+            row is not None
+            and row[0] == "Lock"
+            and blocker_pid in row[1]
+        ):
+            return
+
+        time.sleep(0.01)
+
+    raise AssertionError(
+        f"Backend {backend_pid} never blocked "
+        f"on backend {blocker_pid}"
+    )
