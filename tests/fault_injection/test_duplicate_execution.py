@@ -51,9 +51,7 @@ def count_job_effects(conn, job_id):
         return cur.fetchone()[0]
 
 
-def record_job_effect_idempotent(
-    conn, job_id, idempotency_key, worker_id, attempt
-):
+def record_job_effect_idempotent(conn, job_id, idempotency_key, worker_id, attempt):
     """
     Simulate an IDEMPOTENT job handler's side effect.
 
@@ -307,6 +305,104 @@ def test_concurrent_idempotent_handlers_record_single_effect(
     assert get_job_state(conn_b, job_id) == state_before
 
     # Worker B owns attempt 2 and completes the job.
+    assert complete_job(conn_b, job_id, "worker-B", claimed_b["attempt"]) is True
+
+    status, worker_id, lease_expires_at, attempt = get_job_state(conn_b, job_id)
+    assert status == "COMPLETED"
+    assert worker_id == "worker-B"
+    assert lease_expires_at is None
+    assert attempt == 2
+
+
+def test_concurrent_idempotent_handler_succeeds_after_rollback(
+    clean_jobs,
+    unique_job_effects_table,
+    conn_a,
+    conn_b,
+    conn_monitor,
+):
+    """
+    Same race as above, but Worker A's transaction rolls back instead
+    of committing. B was only waiting on A's row; once that row is gone
+    there is no conflict, so B's insert succeeds. Still one effect.
+    """
+    key = "charge-customer-42"
+    job_id = insert_job(conn_a, idempotency_key=key)
+
+    # Worker A claims attempt 1, then stalls.
+    claimed_a = claim_job(conn_a, "worker-A")
+    assert claimed_a["attempt"] == 1
+
+    # A's lease expires, recovery requeues, Worker B claims attempt 2.
+    expire_lease(conn_b, job_id)
+    assert recover_expired_jobs(conn_b) == {"retried": 1, "failed": 0}
+
+    claimed_b = claim_job(conn_b, "worker-B")
+    assert claimed_b["id"] == job_id
+    assert claimed_b["attempt"] == 2
+
+    results = {}
+    errors = []
+
+    def worker_b():
+        try:
+            results["performed"] = record_job_effect_idempotent(
+                conn_b, job_id, key, "worker-B", claimed_b["attempt"]
+            )
+        except Exception as exc:  # re-raised on the main thread below
+            errors.append(exc)
+
+    thread_b = threading.Thread(target=worker_b)
+    pid_a = conn_a.info.backend_pid
+    pid_b = conn_b.info.backend_pid
+
+    try:
+        # force_rollback=True: leaving the block rolls A back without
+        # raising, as if A failed before committing its effect.
+        with conn_a.transaction(force_rollback=True):
+            performed_a = record_job_effect_idempotent(
+                conn_a, job_id, key, "worker-A", claimed_a["attempt"]
+            )
+
+            thread_b.start()
+
+            wait_until_blocked_on_lock(conn_monitor, pid_b, blocker_pid=pid_a)
+
+        # A rolled back, so its row never existed for anyone else.
+        # B wakes up, finds no conflict, and inserts its own effect.
+
+    finally:
+        if thread_b.ident is not None:
+            thread_b.join(timeout=5)
+
+    assert not thread_b.is_alive(), "Worker B never finished"
+
+    if errors:
+        raise errors[0]
+
+    # A's insert "succeeded" inside its transaction, but that transaction
+    # rolled back: a return value means nothing until the commit does.
+    assert performed_a is True
+    assert results["performed"] is True
+
+    # Exactly one committed effect, and it's Worker B's.
+    assert count_job_effects(conn_b, job_id) == 1
+    assert get_job_effects(conn_b, job_id) == [(key, "worker-B", 2)]
+
+    # Worker A's stale completion is rejected and changes nothing.
+    state_before = get_job_state(conn_b, job_id)
+
+    status, worker_id, lease_expires_at, attempt = state_before
+    assert status == "RUNNING"
+    assert worker_id == "worker-B"
+    assert lease_expires_at is not None
+    assert attempt == 2
+
+    assert complete_job(conn_a, job_id, "worker-A", claimed_a["attempt"]) is False
+
+    assert get_job_state(conn_b, job_id) == state_before
+
+    # Worker B completes the job.
     assert complete_job(conn_b, job_id, "worker-B", claimed_b["attempt"]) is True
 
     status, worker_id, lease_expires_at, attempt = get_job_state(conn_b, job_id)
